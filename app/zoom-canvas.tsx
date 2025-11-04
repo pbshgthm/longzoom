@@ -21,6 +21,12 @@ const ZOOM_EASING = 0.1;
 const ZOOM_TOLERANCE = 0.001;
 const WHEEL_SENSITIVITY = 0.0015;
 const INNER_FIT_EXPONENT = 0.75;
+const LINE_TO_PIXEL_FACTOR = 16;
+const PAGE_TO_PIXEL_FACTOR = 800;
+const MAX_WHEEL_DELTA = 120;
+const WHEEL_NORMALIZATION_FACTOR = 300;
+const WHEEL_DAMPING = 0.75;
+const WHEEL_EPSILON = 0.0001;
 const CLEAR_COLOR = {
   r: 0.02,
   g: 0.02,
@@ -349,12 +355,28 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
       }
     };
 
+    let wheelMomentum = 0;
+
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
-      const deltaExponent = event.deltaY * WHEEL_SENSITIVITY;
-      targetZoomExponent = clampZoomExponent(
-        targetZoomExponent + deltaExponent
+      const normalizedDelta = (() => {
+        if (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL) {
+          return event.deltaY;
+        }
+        if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+          return event.deltaY * LINE_TO_PIXEL_FACTOR;
+        }
+        if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+          return event.deltaY * PAGE_TO_PIXEL_FACTOR;
+        }
+        return event.deltaY;
+      })();
+      const clampedDelta = Math.max(
+        -MAX_WHEEL_DELTA,
+        Math.min(MAX_WHEEL_DELTA, normalizedDelta)
       );
+      const scaledDelta = clampedDelta / WHEEL_NORMALIZATION_FACTOR;
+      wheelMomentum += scaledDelta;
     };
 
     const beginPinch = (event: TouchEvent) => {
@@ -420,6 +442,20 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
       gl.viewport(0, 0, canvas.width, canvas.height);
     };
 
+    const applyWheelMomentum = () => {
+      if (wheelMomentum === 0) {
+        return;
+      }
+      const deltaExponent = wheelMomentum * WHEEL_SENSITIVITY;
+      targetZoomExponent = clampZoomExponent(
+        targetZoomExponent + deltaExponent
+      );
+      wheelMomentum *= WHEEL_DAMPING;
+      if (Math.abs(wheelMomentum) < WHEEL_EPSILON) {
+        wheelMomentum = 0;
+      }
+    };
+
     const stepZoom = () => {
       currentZoomExponent +=
         (targetZoomExponent - currentZoomExponent) * ZOOM_EASING;
@@ -461,6 +497,7 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
         return;
       }
 
+      applyWheelMomentum();
       const zoomScale = stepZoom();
       drawScene(zoomScale);
 
