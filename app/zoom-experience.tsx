@@ -15,6 +15,7 @@ export type ImageSet = {
 };
 
 const FADE_DURATION_MS = 450;
+const BLACK_HOLD_MS = 120;
 
 const formatLabel = (name: string) =>
   name.replace(/[-_]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
@@ -43,6 +44,8 @@ export default function ZoomExperience({
   >("idle");
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [highlightSet, setHighlightSet] = useState(() => resolveInitialSet());
+  const [fadeInComplete, setFadeInComplete] = useState(false);
+  const [revealReady, setRevealReady] = useState(false);
 
   useEffect(() => {
     if (imageSets.length === 0) {
@@ -65,6 +68,11 @@ export default function ZoomExperience({
     return selected?.images ?? imageSets[0]?.images ?? [];
   }, [activeSet, imageSets]);
 
+  const overlayClass = cx(
+    "pointer-events-none absolute inset-0 bg-black transition-opacity duration-[450ms] ease-linear",
+    overlayVisible ? "opacity-100" : "opacity-0"
+  );
+
   const startTransition = useCallback(
     (target: string) => {
       if (fadePhase !== "idle" || target === activeSet) {
@@ -72,6 +80,8 @@ export default function ZoomExperience({
       }
       setPendingSet(target);
       setHighlightSet(target);
+      setFadeInComplete(false);
+      setRevealReady(false);
       setOverlayVisible(true);
       setFadePhase("fading-in");
     },
@@ -84,10 +94,9 @@ export default function ZoomExperience({
         if (pendingSet) {
           setActiveSet(pendingSet);
           setPendingSet(null);
-          setFadePhase("waiting");
-          return;
         }
-        setFadePhase("fading-out");
+        setFadeInComplete(true);
+        setFadePhase("waiting");
       }, FADE_DURATION_MS);
       return () => window.clearTimeout(timer);
     }
@@ -97,6 +106,8 @@ export default function ZoomExperience({
       const timer = window.setTimeout(() => {
         setOverlayVisible(false);
         setFadePhase("idle");
+        setFadeInComplete(false);
+        setRevealReady(false);
       }, FADE_DURATION_MS);
       return () => window.clearTimeout(timer);
     }
@@ -104,11 +115,17 @@ export default function ZoomExperience({
   }, [fadePhase, pendingSet]);
 
   const handleCanvasReady = useCallback(() => {
-    if (fadePhase === "waiting") {
-      setOverlayVisible(false);
-      setFadePhase("fading-out");
+    setRevealReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (fadePhase === "waiting" && fadeInComplete && revealReady) {
+      window.setTimeout(() => {
+        setOverlayVisible(false);
+        setFadePhase("fading-out");
+      }, BLACK_HOLD_MS);
     }
-  }, [fadePhase]);
+  }, [fadePhase, fadeInComplete, revealReady]);
 
   useEffect(() => {
     setHighlightSet(activeSet);
@@ -129,12 +146,7 @@ export default function ZoomExperience({
   return (
     <div className="relative min-h-[100dvh] min-h-screen w-screen overflow-hidden bg-black">
       <ZoomCanvas images={activeImages} onReady={handleCanvasReady} />
-      <div
-        className={cx(
-          "pointer-events-none absolute inset-0 bg-black opacity-0 transition-opacity duration-[450ms] ease-linear",
-          overlayVisible && "opacity-100"
-        )}
-      />
+      <div className={overlayClass} />
       <div
         className="pointer-events-none absolute inset-x-0 flex justify-center"
         style={{
