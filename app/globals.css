@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    margin: 0;
+    overflow: hidden;
+    background-color: #ffffff;
+    color: #171717;
+    -webkit-font-smoothing: antialiased;
+  }
+}

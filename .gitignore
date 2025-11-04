@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+
+# next.js build output
+.next/
+out/
+
+# production
+dist/
+
+# logs
+*.log
+pnpm-debug.log*
+
+# env files
+.env*
+
+# editor directories
+.vscode/
+.idea/
+
+# macOS artifacts
+.DS_Store
