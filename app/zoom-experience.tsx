@@ -133,7 +133,10 @@ export default function ZoomExperience({
 
   if (imageSets.length === 0) {
     return (
-      <div className="relative min-h-[100dvh] min-h-screen w-screen overflow-hidden bg-black text-white">
+      <div
+        className="relative min-h-[100dvh] min-h-[100svh] w-screen overflow-hidden bg-black text-white"
+        style={{ minHeight: "100dvh" }}
+      >
         <div className="absolute inset-0 flex items-center justify-center bg-black">
           <p className="text-sm opacity-70">
             Add image collections to <code>public/images</code>.
@@ -144,7 +147,10 @@ export default function ZoomExperience({
   }
 
   return (
-    <div className="relative min-h-[100dvh] min-h-screen w-screen overflow-hidden bg-black">
+    <div
+      className="relative min-h-[100dvh] min-h-[100svh] w-screen overflow-hidden bg-black"
+      style={{ minHeight: "100dvh" }}
+    >
       <ZoomCanvas images={activeImages} onReady={handleCanvasReady} />
       <div className={overlayClass} />
       <div
