@@ -91,8 +91,8 @@ export default function ZoomExperience({
       setPermissionState("granted");
     }
 
-    // Low-pass filter for smoothing (0.1 = very smooth, 0.5 = more responsive)
-    const smoothingFactor = 0.15;
+    // Low-pass filter for smoothing (0.05 = very smooth, 0.5 = more responsive)
+    const smoothingFactor = 0.06;
     let smoothedDegrees: number | null = null;
 
     const handleMotion = (event: DeviceMotionEvent) => {

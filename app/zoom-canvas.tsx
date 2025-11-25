@@ -46,8 +46,9 @@ const TEXTURE_UNIT_INDEX = 0;
 const FLIP_TEXTURE_COORDINATES = 0;
 const EDGE_FEATHER_WIDTH = 0.12;
 const OUTER_EDGE_FEATHER = 0;
-const ORIENTATION_DEAD_ZONE = 10;
+const ORIENTATION_DEAD_ZONE = 0;
 const ORIENTATION_ZOOM_SPEED = 0.02;
+const MIN_ZOOM_SPEED = 0.3;
 const FRAME_TIME_FACTOR = 0.016;
 const SNAP_BACK_SPEED = 0.25;
 const DEGREES_IN_HALF_CIRCLE = 180;
@@ -497,20 +498,18 @@ export default function ZoomCanvas({
         return;
       }
 
-      // Dead zone: no zoom when tilted less than ±10 degrees
-      if (Math.abs(currentOrientation) <= ORIENTATION_DEAD_ZONE) {
-        return;
-      }
-
       // Calculate zoom direction and magnitude
       // Positive orientation (tilt right) = zoom in (increase exponent)
       // Negative orientation (tilt left) = zoom out (decrease exponent)
-      const tiltBeyondDeadZone =
-        currentOrientation > 0
-          ? currentOrientation - ORIENTATION_DEAD_ZONE
-          : currentOrientation + ORIENTATION_DEAD_ZONE;
+      let zoomDelta = currentOrientation * ORIENTATION_ZOOM_SPEED;
 
-      const zoomDelta = tiltBeyondDeadZone * ORIENTATION_ZOOM_SPEED;
+      // Apply minimum speed - always moving at least a little in the tilt direction
+      if (currentOrientation > ORIENTATION_DEAD_ZONE) {
+        zoomDelta = Math.max(zoomDelta, MIN_ZOOM_SPEED);
+      } else if (currentOrientation < -ORIENTATION_DEAD_ZONE) {
+        zoomDelta = Math.min(zoomDelta, -MIN_ZOOM_SPEED);
+      }
+
       targetZoomExponent += zoomDelta * FRAME_TIME_FACTOR;
 
       // Clamp to valid range
