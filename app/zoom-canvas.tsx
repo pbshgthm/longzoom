@@ -5,6 +5,8 @@ import { useEffect, useRef } from "react";
 type ZoomCanvasProps = {
   images: string[];
   onReady?: () => void;
+  orientation?: number | null;
+  rawOrientation?: number | null;
 };
 
 type Layer = {
@@ -44,6 +46,12 @@ const TEXTURE_UNIT_INDEX = 0;
 const FLIP_TEXTURE_COORDINATES = 0;
 const EDGE_FEATHER_WIDTH = 0.12;
 const OUTER_EDGE_FEATHER = 0;
+const ORIENTATION_DEAD_ZONE = 10;
+const ORIENTATION_ZOOM_SPEED = 0.02;
+const FRAME_TIME_FACTOR = 0.016;
+const SNAP_BACK_SPEED = 0.25;
+const DEGREES_IN_HALF_CIRCLE = 180;
+const DEG_TO_RAD = Math.PI / DEGREES_IN_HALF_CIRCLE;
 
 const vertexSource = `
   attribute vec2 a_position;
@@ -51,6 +59,7 @@ const vertexSource = `
 
   uniform float u_scale;
   uniform float u_zoom;
+  uniform float u_rotation;
   uniform vec2 u_canvasSize;
   uniform vec2 u_baseSize;
 
@@ -58,9 +67,20 @@ const vertexSource = `
 
   void main() {
     vec2 scaled = (a_position * u_scale) / u_zoom;
+
+    // Rotate in world space FIRST (before aspect correction) to prevent warping
+    // This gives us a true 2D rotation of the rectangle
+    float cosR = cos(u_rotation);
+    float sinR = sin(u_rotation);
+    vec2 rotated = vec2(
+      scaled.x * cosR - scaled.y * sinR,
+      scaled.x * sinR + scaled.y * cosR
+    );
+
+    // Now normalize and apply aspect correction
     vec2 normalized = vec2(
-      scaled.x / (u_baseSize.x * 0.5),
-      scaled.y / (u_baseSize.y * 0.5)
+      rotated.x / (u_baseSize.x * 0.5),
+      rotated.y / (u_baseSize.y * 0.5)
     );
 
     float canvasAspect = u_canvasSize.x / u_canvasSize.y;
@@ -145,11 +165,27 @@ const buildLayers = (images: string[]): Layer[] =>
 
 const normalizeDepth = (value: number) => Math.max(value, 0);
 
-export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
+export default function ZoomCanvas({
+  images,
+  onReady,
+  orientation,
+  rawOrientation,
+}: ZoomCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const readyRef = useRef(false);
+  const orientationRef = useRef<number | null>(null);
+  const rawOrientationRef = useRef<number | null>(null);
   const layerCount = images.length;
+
+  // Keep orientation refs in sync with props
+  useEffect(() => {
+    orientationRef.current = orientation ?? null;
+  }, [orientation]);
+
+  useEffect(() => {
+    rawOrientationRef.current = rawOrientation ?? null;
+  }, [rawOrientation]);
 
   useEffect(() => {
     if (layerCount === 0) {
@@ -174,8 +210,6 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
     const maxDepth = normalizeDepth(layers.length - 1);
     const innerFitExponent = Math.min(INNER_FIT_EXPONENT, maxDepth);
     const zoomExpRange = { min: innerFitExponent, max: maxDepth };
-    const clampZoomExponent = (value: number) =>
-      Math.min(zoomExpRange.max, Math.max(zoomExpRange.min, value));
 
     const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexSource);
     const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
@@ -185,6 +219,7 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
     const texCoordLocation = gl.getAttribLocation(program, "a_texCoord");
     const scaleLocation = gl.getUniformLocation(program, "u_scale");
     const zoomLocation = gl.getUniformLocation(program, "u_zoom");
+    const rotationLocation = gl.getUniformLocation(program, "u_rotation");
     const canvasSizeLocation = gl.getUniformLocation(program, "u_canvasSize");
     const baseSizeLocation = gl.getUniformLocation(program, "u_baseSize");
     const textureLocation = gl.getUniformLocation(program, "u_texture");
@@ -195,6 +230,7 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
       texCoordLocation === -1 ||
       scaleLocation === null ||
       zoomLocation === null ||
+      rotationLocation === null ||
       canvasSizeLocation === null ||
       baseSizeLocation === null ||
       textureLocation === null ||
@@ -263,10 +299,12 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
 
     let animationFrame = 0;
     let cancelled = false;
-    let targetZoomExponent = zoomExpRange.min;
-    let currentZoomExponent = zoomExpRange.min;
+    // Start at middle zoom level
+    const middleZoom = (zoomExpRange.min + zoomExpRange.max) / 2;
+    let targetZoomExponent = middleZoom;
+    let currentZoomExponent = middleZoom;
     let pinchStartDistance = 0;
-    let pinchStartExponent = zoomExpRange.min;
+    let pinchStartExponent = middleZoom;
     let pinchActive = false;
 
     const getTouchDistance = (touches: TouchList) => {
@@ -401,9 +439,7 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
         return;
       }
       const deltaExponent = Math.log(ratio) / Math.log(SCALE_FACTOR);
-      targetZoomExponent = clampZoomExponent(
-        pinchStartExponent - deltaExponent
-      );
+      targetZoomExponent = pinchStartExponent - deltaExponent;
     };
 
     const endPinch = (event: TouchEvent) => {
@@ -447,13 +483,41 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
         return;
       }
       const deltaExponent = wheelMomentum * WHEEL_SENSITIVITY;
-      targetZoomExponent = clampZoomExponent(
-        targetZoomExponent + deltaExponent
-      );
+      targetZoomExponent += deltaExponent;
+
       wheelMomentum *= WHEEL_DAMPING;
       if (Math.abs(wheelMomentum) < WHEEL_EPSILON) {
         wheelMomentum = 0;
       }
+    };
+
+    const applyOrientationZoom = () => {
+      const currentOrientation = orientationRef.current;
+      if (currentOrientation === null) {
+        return;
+      }
+
+      // Dead zone: no zoom when tilted less than ±10 degrees
+      if (Math.abs(currentOrientation) <= ORIENTATION_DEAD_ZONE) {
+        return;
+      }
+
+      // Calculate zoom direction and magnitude
+      // Positive orientation (tilt right) = zoom in (increase exponent)
+      // Negative orientation (tilt left) = zoom out (decrease exponent)
+      const tiltBeyondDeadZone =
+        currentOrientation > 0
+          ? currentOrientation - ORIENTATION_DEAD_ZONE
+          : currentOrientation + ORIENTATION_DEAD_ZONE;
+
+      const zoomDelta = tiltBeyondDeadZone * ORIENTATION_ZOOM_SPEED;
+      targetZoomExponent += zoomDelta * FRAME_TIME_FACTOR;
+
+      // Clamp to valid range
+      targetZoomExponent = Math.max(
+        zoomExpRange.min,
+        Math.min(zoomExpRange.max, targetZoomExponent)
+      );
     };
 
     const stepZoom = () => {
@@ -471,6 +535,12 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
 
       gl.uniform1f(zoomLocation, zoomScale);
       gl.uniform2f(canvasSizeLocation, canvas.width, canvas.height);
+
+      // Rotate images based on device orientation (use raw value for accurate rotation)
+      const currentRawOrientation = rawOrientationRef.current ?? 0;
+      const rotationRadians = currentRawOrientation * DEG_TO_RAD;
+      gl.uniform1f(rotationLocation, rotationRadians);
+
       gl.activeTexture(gl.TEXTURE0 + TEXTURE_UNIT_INDEX);
 
       for (let index = layers.length - 1; index >= 0; index -= 1) {
@@ -498,6 +568,29 @@ export default function ZoomCanvas({ images, onReady }: ZoomCanvasProps) {
       }
 
       applyWheelMomentum();
+      applyOrientationZoom();
+
+      // Fast snap-back when not interacting
+      if (!pinchActive && wheelMomentum === 0) {
+        if (targetZoomExponent < zoomExpRange.min) {
+          targetZoomExponent +=
+            (zoomExpRange.min - targetZoomExponent) * SNAP_BACK_SPEED;
+          if (
+            Math.abs(targetZoomExponent - zoomExpRange.min) < ZOOM_TOLERANCE
+          ) {
+            targetZoomExponent = zoomExpRange.min;
+          }
+        } else if (targetZoomExponent > zoomExpRange.max) {
+          targetZoomExponent +=
+            (zoomExpRange.max - targetZoomExponent) * SNAP_BACK_SPEED;
+          if (
+            Math.abs(targetZoomExponent - zoomExpRange.max) < ZOOM_TOLERANCE
+          ) {
+            targetZoomExponent = zoomExpRange.max;
+          }
+        }
+      }
+
       const zoomScale = stepZoom();
       drawScene(zoomScale);
 

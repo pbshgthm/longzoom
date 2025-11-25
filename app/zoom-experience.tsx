@@ -17,6 +17,12 @@ export type ImageSet = {
 const FADE_DURATION_MS = 450;
 const BLACK_HOLD_MS = 120;
 
+declare global {
+  interface DeviceOrientationEvent {
+    requestPermission?: () => Promise<"granted" | "denied">;
+  }
+}
+
 const formatLabel = (name: string) =>
   name.replace(/[-_]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 
@@ -46,6 +52,83 @@ export default function ZoomExperience({
   const [highlightSet, setHighlightSet] = useState(() => resolveInitialSet());
   const [fadeInComplete, setFadeInComplete] = useState(false);
   const [revealReady, setRevealReady] = useState(false);
+  const [orientation, setOrientation] = useState<number | null>(null);
+  const [rawOrientation, setRawOrientation] = useState<number | null>(null);
+  const [permissionState, setPermissionState] = useState<
+    "checking" | "needs-permission" | "granted" | "denied" | "unavailable"
+  >("checking");
+
+  const requestMotionPermission = useCallback(async () => {
+    // biome-ignore lint/suspicious/noExplicitAny: iOS-specific API
+    const DeviceMotionEventClass = DeviceMotionEvent as any;
+    
+    if (typeof DeviceMotionEventClass.requestPermission === "function") {
+      try {
+        const permission = await DeviceMotionEventClass.requestPermission();
+        if (permission === "granted") {
+          setPermissionState("granted");
+        } else {
+          setPermissionState("denied");
+        }
+      } catch (error) {
+        console.error("Permission request failed:", error);
+        setPermissionState("denied");
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    // biome-ignore lint/suspicious/noExplicitAny: iOS-specific API
+    const DeviceMotionEventClass = DeviceMotionEvent as any;
+    
+    // Check if permission API exists (iOS 13+)
+    const hasPermissionAPI = typeof DeviceMotionEventClass.requestPermission === "function";
+    
+    if (hasPermissionAPI) {
+      setPermissionState("needs-permission");
+    } else {
+      // Non-iOS or older iOS - permission not needed, events fire automatically
+      setPermissionState("granted");
+    }
+
+    // Low-pass filter for smoothing (0.1 = very smooth, 0.5 = more responsive)
+    const smoothingFactor = 0.15;
+    let smoothedDegrees: number | null = null;
+
+    const handleMotion = (event: DeviceMotionEvent) => {
+      // Use accelerometer to get tilt relative to gravity
+      // This is independent of compass heading (alpha)
+      const accel = event.accelerationIncludingGravity;
+      if (accel && accel.x !== null && accel.y !== null) {
+        // When phone is upright (charging port down, screen facing you):
+        // - gravity points down (negative y in device coords)
+        // - x tells us left-right tilt
+        // atan2(x, -y) gives angle in radians, convert to degrees
+        const radians = Math.atan2(accel.x, -accel.y);
+        const degrees = radians * (180 / Math.PI);
+        
+        // Apply low-pass filter for smoothing
+        if (smoothedDegrees === null) {
+          smoothedDegrees = degrees;
+        } else {
+          smoothedDegrees = smoothedDegrees * (1 - smoothingFactor) + degrees * smoothingFactor;
+        }
+        
+        // Raw value for rotation (smoothed), clamped to ±90° (landscape limits)
+        const rotationClamped = Math.max(-90, Math.min(90, smoothedDegrees));
+        setRawOrientation(rotationClamped);
+        // Clamped value for zoom control and display
+        const clamped = Math.max(-60, Math.min(60, smoothedDegrees));
+        setOrientation(Math.round(clamped));
+        if (hasPermissionAPI) {
+          setPermissionState("granted");
+        }
+      }
+    };
+
+    window.addEventListener("devicemotion", handleMotion);
+    return () => window.removeEventListener("devicemotion", handleMotion);
+  }, []);
 
   useEffect(() => {
     if (imageSets.length === 0) {
@@ -151,7 +234,36 @@ export default function ZoomExperience({
       className="relative min-h-[100dvh] min-h-[100svh] w-screen overflow-hidden bg-black"
       style={{ minHeight: "100dvh" }}
     >
-      <ZoomCanvas images={activeImages} onReady={handleCanvasReady} />
+      <ZoomCanvas images={activeImages} onReady={handleCanvasReady} orientation={orientation} rawOrientation={rawOrientation} />
+      
+      {/* Orientation circle */}
+      <div className="absolute top-4 right-4 z-10" style={{ pointerEvents: "none" }}>
+        {permissionState === "needs-permission" ? (
+          <button
+            className="flex h-16 w-16 flex-col items-center justify-center rounded-full border-2 border-white/80 bg-white/10 backdrop-blur-sm text-[10px] font-medium text-white/90 hover:text-white hover:bg-white/20 active:scale-95 transition-all cursor-pointer"
+            onClick={requestMotionPermission}
+            style={{ pointerEvents: "auto" }}
+            type="button"
+          >
+            Tap to<br />Enable
+          </button>
+        ) : (
+          <div className="flex h-16 w-16 flex-col items-center justify-center rounded-full border-2 border-white/80 bg-white/10 backdrop-blur-sm">
+            {permissionState === "denied" ? (
+              <span className="text-[10px] text-white/60 text-center px-1">Denied</span>
+            ) : permissionState === "checking" ? (
+              <span className="text-[10px] text-white/60">...</span>
+            ) : rawOrientation !== null ? (
+              <span className="font-mono text-xl font-bold tabular-nums text-white">
+                {rawOrientation > 0 ? "+" : ""}{Math.round(rawOrientation)}°
+              </span>
+            ) : (
+              <span className="text-[10px] text-white/60 text-center px-1">No sensor</span>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className={overlayClass} />
       <div
         className="pointer-events-none absolute inset-x-0 flex justify-center"
