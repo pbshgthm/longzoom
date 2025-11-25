@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ZoomCanvas from "./zoom-canvas";
 
 type ZoomExperienceProps = {
@@ -16,6 +16,16 @@ export type ImageSet = {
 
 const FADE_DURATION_MS = 450;
 const BLACK_HOLD_MS = 120;
+const BUTTON_RADIUS = 24; // Radius of each circular button
+const INNER_RADIUS = 50; // Inner radius of the ring
+// Derived values:
+// - Buttons arranged along circle at: INNER_RADIUS + BUTTON_RADIUS
+// - Outer radius of ring: INNER_RADIUS + 2 * BUTTON_RADIUS
+const BUTTON_CIRCLE_RADIUS = INNER_RADIUS + BUTTON_RADIUS;
+const OUTER_RADIUS = INNER_RADIUS + 2 * BUTTON_RADIUS;
+const RING_THICKNESS = 2 * BUTTON_RADIUS; // Outer - Inner
+const ROTATION_EASING = 0.12;
+const SNAP_THRESHOLD = 0.1;
 
 declare global {
   interface DeviceOrientationEvent {
@@ -57,6 +67,149 @@ export default function ZoomExperience({
   const [permissionState, setPermissionState] = useState<
     "checking" | "needs-permission" | "granted" | "denied" | "unavailable"
   >("checking");
+  const [isMobile, setIsMobile] = useState(false);
+
+  // Circular selector state
+  const [mounted, setMounted] = useState(false);
+  
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const initialIndex = useMemo(() => {
+    const idx = imageSets.findIndex((set) => set.name === resolveInitialSet());
+    return idx >= 0 ? idx : 0;
+  }, [imageSets, resolveInitialSet]);
+  
+  const [ringRotation, setRingRotation] = useState(0);
+  const [targetRotation, setTargetRotation] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const dragStartRef = useRef<{ lastAngle: number } | null>(null);
+  const ringRef = useRef<HTMLDivElement>(null);
+  const animationRef = useRef<number>(0);
+
+  const anglePerItem = useMemo(
+    () => (imageSets.length > 0 ? (2 * Math.PI) / imageSets.length : 0),
+    [imageSets.length]
+  );
+
+  // Get the index of the item at the bottom (selected)
+  const selectedIndex = useMemo(() => {
+    if (imageSets.length === 0) return 0;
+    // Normalize rotation to 0-2π range
+    const normalizedRotation = ((ringRotation % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    // When ringRotation = 0, item at index 0 is at bottom (PI/2)
+    // The ring rotates counter-clockwise (negative rotation applied)
+    // So as ringRotation increases, we need to find which index is now at bottom
+    const rawIndex = Math.round(normalizedRotation / anglePerItem);
+    return ((rawIndex % imageSets.length) + imageSets.length) % imageSets.length;
+  }, [ringRotation, anglePerItem, imageSets.length]);
+
+  // Animation loop for smooth rotation
+  useEffect(() => {
+    const animate = () => {
+      setRingRotation((prev) => {
+        const diff = targetRotation - prev;
+        if (Math.abs(diff) < 0.001) return targetRotation;
+        return prev + diff * ROTATION_EASING;
+      });
+      animationRef.current = requestAnimationFrame(animate);
+    };
+    animationRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(animationRef.current);
+  }, [targetRotation]);
+
+  // Snap to nearest item when not dragging
+  useEffect(() => {
+    if (!isDragging && imageSets.length > 0) {
+      const nearestIndex = Math.round(targetRotation / anglePerItem);
+      const snappedRotation = nearestIndex * anglePerItem;
+      if (Math.abs(targetRotation - snappedRotation) > SNAP_THRESHOLD * anglePerItem) {
+        setTargetRotation(snappedRotation);
+      }
+    }
+  }, [isDragging, targetRotation, anglePerItem, imageSets.length]);
+
+  // Calculate angle from center of ring to pointer
+  const getPointerAngle = useCallback((clientX: number, clientY: number) => {
+    if (!ringRef.current) return 0;
+    const rect = ringRef.current.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    return Math.atan2(clientY - centerY, clientX - centerX);
+  }, []);
+
+  // Handle hover
+  const handlePointerEnter = useCallback(() => {
+    setIsHovered(true);
+  }, []);
+
+  const handlePointerLeave = useCallback(() => {
+    if (!isDragging) {
+      setIsHovered(false);
+    }
+  }, [isDragging]);
+
+  // Handle drag start
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (fadePhase !== "idle") return;
+    setIsDragging(true);
+    setIsHovered(true);
+    const lastAngle = getPointerAngle(e.clientX, e.clientY);
+    dragStartRef.current = { lastAngle };
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }, [fadePhase, getPointerAngle]);
+
+  // Handle drag move
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!isDragging || !dragStartRef.current) return;
+    
+    const currentAngle = getPointerAngle(e.clientX, e.clientY);
+    let delta = currentAngle - dragStartRef.current.lastAngle;
+    
+    // Handle wrap-around for the small movement
+    if (delta > Math.PI) delta -= 2 * Math.PI;
+    if (delta < -Math.PI) delta += 2 * Math.PI;
+
+    dragStartRef.current.lastAngle = currentAngle;
+
+    // Apply rotation (subtract delta to follow finger)
+    setTargetRotation((prev) => prev - delta);
+  }, [isDragging, getPointerAngle]);
+
+  // Handle drag end and snap to nearest
+  const handlePointerUp = useCallback(() => {
+    if (!isDragging) return;
+    setIsDragging(false);
+    dragStartRef.current = null;
+    
+    // Snap to nearest item
+    const nearestIndex = Math.round(targetRotation / anglePerItem);
+    setTargetRotation(nearestIndex * anglePerItem);
+  }, [isDragging, targetRotation, anglePerItem]);
+
+  // Reset hover state when drag ends
+  useEffect(() => {
+    if (!isDragging) {
+      setIsHovered(false);
+    }
+  }, [isDragging]);
+
+  // Handle wheel for rotation
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (fadePhase !== "idle") return;
+    e.preventDefault();
+    const delta = e.deltaY * 0.003;
+    setTargetRotation((prev) => prev + delta);
+  }, [fadePhase]);
+
+
+  // Initialize ring rotation based on initial set
+  useEffect(() => {
+    setRingRotation(initialIndex * anglePerItem);
+    setTargetRotation(initialIndex * anglePerItem);
+  }, [initialIndex, anglePerItem]);
 
   const requestMotionPermission = useCallback(async () => {
     // biome-ignore lint/suspicious/noExplicitAny: iOS-specific API
@@ -78,16 +231,26 @@ export default function ZoomExperience({
   }, []);
 
   useEffect(() => {
+    // Detect if mobile device
+    const checkMobile = () => {
+      const userAgent = navigator.userAgent || navigator.vendor;
+      const isMobileDevice = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent.toLowerCase());
+      setIsMobile(isMobileDevice);
+      return isMobileDevice;
+    };
+    
+    const mobile = checkMobile();
+    
     // biome-ignore lint/suspicious/noExplicitAny: iOS-specific API
     const DeviceMotionEventClass = DeviceMotionEvent as any;
     
     // Check if permission API exists (iOS 13+)
     const hasPermissionAPI = typeof DeviceMotionEventClass.requestPermission === "function";
     
-    if (hasPermissionAPI) {
+    if (hasPermissionAPI && mobile) {
       setPermissionState("needs-permission");
     } else {
-      // Non-iOS or older iOS - permission not needed, events fire automatically
+      // Non-iOS or older iOS or desktop - permission not needed, events fire automatically
       setPermissionState("granted");
     }
 
@@ -171,6 +334,14 @@ export default function ZoomExperience({
     [activeSet, fadePhase]
   );
 
+  // Trigger transition when selected item changes
+  useEffect(() => {
+    const selectedSet = imageSets[selectedIndex];
+    if (selectedSet && selectedSet.name !== highlightSet && !isDragging) {
+      startTransition(selectedSet.name);
+    }
+  }, [selectedIndex, imageSets, highlightSet, isDragging, startTransition]);
+
   useEffect(() => {
     if (fadePhase === "fading-in") {
       const timer = window.setTimeout(() => {
@@ -236,81 +407,127 @@ export default function ZoomExperience({
     >
       <ZoomCanvas images={activeImages} onReady={handleCanvasReady} orientation={orientation} rawOrientation={rawOrientation} />
       
-      {/* Orientation circle */}
-      <div className="absolute top-4 right-4 z-10" style={{ pointerEvents: "none" }}>
-        {permissionState === "needs-permission" ? (
+      {/* Permission prompt - only on mobile, centered */}
+      {isMobile && permissionState === "needs-permission" && (
+        <div className="absolute inset-0 flex items-center justify-center z-50">
           <button
-            className="flex h-16 w-16 flex-col items-center justify-center rounded-full border-2 border-white/80 bg-white/10 backdrop-blur-sm text-[10px] font-medium text-white/90 hover:text-white hover:bg-white/20 active:scale-95 transition-all cursor-pointer"
+            className="flex h-32 w-32 flex-col items-center justify-center rounded-full bg-white/10 backdrop-blur-md text-xs font-medium text-white hover:bg-white/20 active:scale-95 transition-all cursor-pointer shadow-2xl"
             onClick={requestMotionPermission}
-            style={{ pointerEvents: "auto" }}
             type="button"
           >
-            Tap to<br />Enable
+            Tap to enable<br />gyroscope
           </button>
-        ) : (
-          <div className="flex h-16 w-16 flex-col items-center justify-center rounded-full border-2 border-white/80 bg-white/10 backdrop-blur-sm">
-            {permissionState === "denied" ? (
-              <span className="text-[10px] text-white/60 text-center px-1">Denied</span>
-            ) : permissionState === "checking" ? (
-              <span className="text-[10px] text-white/60">...</span>
-            ) : rawOrientation !== null ? (
-              <span className="font-mono text-xl font-bold tabular-nums text-white">
-                {rawOrientation > 0 ? "+" : ""}{Math.round(rawOrientation)}°
-              </span>
-            ) : (
-              <span className="text-[10px] text-white/60 text-center px-1">No sensor</span>
-            )}
-          </div>
-        )}
-      </div>
+        </div>
+      )}
 
       <div className={overlayClass} />
-      <div
-        className="pointer-events-none absolute inset-x-0 flex justify-center"
-        style={{
-          bottom:
-            "max(2.75rem, calc(env(safe-area-inset-bottom, 0px) + 2.75rem))",
-        }}
-      >
-        <div className="flex gap-3 rounded-full bg-black/50 px-4 py-3 backdrop-blur-lg">
-          {imageSets.map((set) => {
-            const isActive = set.name === highlightSet;
-            const preview = set.images[0];
-            const label = formatLabel(set.name);
-            const isTransitioning = fadePhase !== "idle";
-            return (
-              <button
-                aria-label={`View ${label} zoom`}
-                aria-pressed={isActive}
-                className={cx(
-                  "group pointer-events-auto relative h-12 w-12 overflow-hidden rounded-full border border-white/60 bg-transparent transition-opacity duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/80 focus-visible:outline-offset-3 disabled:cursor-wait",
-                  isActive
-                    ? "border-white opacity-100 shadow-[0_10px_25px_rgba(0,0,0,0.4)]"
-                    : "opacity-70"
-                )}
-                disabled={isTransitioning}
-                key={set.name}
-                onClick={() => startTransition(set.name)}
-                type="button"
-              >
-                {preview ? (
-                  <Image
-                    alt={label}
+      
+      {/* Circular ring selector */}
+      {mounted && (
+        <div
+          className="absolute flex items-center justify-center"
+          style={{
+            left: "50%",
+            bottom: "2rem",
+            transform: "translateX(-50%)",
+            width: OUTER_RADIUS * 2,
+            height: OUTER_RADIUS * 2,
+          }}
+        >
+          {/* Ring container - rotates as a whole (hidden when not interacting) */}
+          <div
+            ref={ringRef}
+            className="absolute inset-0 touch-none transition-opacity duration-300"
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerUp}
+            onWheel={handleWheel}
+            style={{ 
+              touchAction: "none",
+              transform: `rotate(${-ringRotation}rad)`,
+              pointerEvents: isHovered || isDragging ? "auto" : "none",
+            }}
+          >
+            {/* Ring background - only the ring band, not the center */}
+            <div
+              className="absolute rounded-full pointer-events-none transition-opacity duration-300"
+              style={{
+                width: OUTER_RADIUS * 2,
+                height: OUTER_RADIUS * 2,
+                left: "50%",
+                top: "50%",
+                transform: "translate(-50%, -50%)",
+                background: `radial-gradient(circle, transparent ${INNER_RADIUS}px, rgba(0, 0, 0, 0.5) ${INNER_RADIUS}px, rgba(0, 0, 0, 0.5) ${OUTER_RADIUS}px, transparent ${OUTER_RADIUS}px)`,
+                backdropFilter: "blur(8px)",
+                WebkitBackdropFilter: "blur(8px)",
+                opacity: isHovered || isDragging ? 1 : 0,
+              }}
+            />
+            
+            {/* Image items positioned on the ring */}
+            {imageSets.map((set, index) => {
+              // Position each item around the circle at BUTTON_CIRCLE_RADIUS
+              // Start at bottom (0 degrees = π/2), going clockwise
+              const itemAngle = index * anglePerItem + Math.PI / 2;
+              const x = Math.cos(itemAngle) * BUTTON_CIRCLE_RADIUS;
+              const y = Math.sin(itemAngle) * BUTTON_CIRCLE_RADIUS;
+              
+              // Check if this item is at the bottom (selected position)
+              // Bottom is at angle PI/2 after rotation
+              const isAtBottom = index === selectedIndex;
+              const preview = set.images[0];
+              const label = formatLabel(set.name);
+              
+              // Show all items when hovered/dragging, only selected when not
+              const shouldShow = isHovered || isDragging || isAtBottom;
+              
+              return (
+                <div
+                  key={set.name}
+                  className="absolute transition-opacity duration-300"
+                  style={{
+                    width: `${BUTTON_RADIUS * 2}px`,
+                    height: `${BUTTON_RADIUS * 2}px`,
+                    left: "50%",
+                    top: "50%",
+                    transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) rotate(${itemAngle - Math.PI / 2}rad)`,
+                    zIndex: isAtBottom ? 10 : 1,
+                    opacity: shouldShow ? 1 : 0,
+                    pointerEvents: isAtBottom ? "auto" : "none",
+                    cursor: isAtBottom ? "grab" : "default",
+                  }}
+                  onPointerDown={isAtBottom ? handlePointerDown : undefined}
+                  onPointerEnter={isAtBottom ? handlePointerEnter : undefined}
+                  onPointerLeave={isAtBottom ? handlePointerLeave : undefined}
+                >
+                  <div
                     className={cx(
-                      "h-full w-full object-cover transition duration-200 group-hover:grayscale-0",
-                      isActive ? "grayscale-0" : "grayscale"
+                      "relative h-full w-full overflow-hidden rounded-full border-2 bg-black/50",
+                      isAtBottom
+                        ? "border-white shadow-[0_0_20px_rgba(255,255,255,0.3)]"
+                        : "border-transparent",
+                      isDragging && isAtBottom ? "cursor-grabbing" : ""
                     )}
-                    fill
-                    priority={isActive}
-                    sizes="48px"
-                    src={preview}
-                  />
-                ) : null}
-              </button>
-            );
-          })}
+                  >
+                    {preview ? (
+                      <Image
+                        alt={label}
+                        className="h-full w-full object-cover select-none"
+                        fill
+                        priority={isAtBottom}
+                        sizes={`${BUTTON_RADIUS * 2}px`}
+                        src={preview}
+                        draggable={false}
+                        style={{ pointerEvents: "none" }}
+                      />
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
