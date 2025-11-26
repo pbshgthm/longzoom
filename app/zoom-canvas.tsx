@@ -8,6 +8,7 @@ type ZoomCanvasProps = {
   orientation?: number | null;
   rawOrientation?: number | null;
   onZoomChange?: (zoomExponent: number, zoomRange: { min: number; max: number }) => void;
+  enabled?: boolean;
 };
 
 type Layer = {
@@ -173,6 +174,7 @@ export default function ZoomCanvas({
   orientation,
   rawOrientation,
   onZoomChange,
+  enabled = true,
 }: ZoomCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -417,6 +419,10 @@ export default function ZoomCanvas({
     let wheelMomentum = 0;
 
     const handleWheel = (event: WheelEvent) => {
+      if (!enabled) {
+        event.preventDefault();
+        return;
+      }
       event.preventDefault();
       const normalizedDelta = (() => {
         if (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL) {
@@ -439,7 +445,7 @@ export default function ZoomCanvas({
     };
 
     const beginPinch = (event: TouchEvent) => {
-      if (event.touches.length !== 2) {
+      if (!enabled || event.touches.length !== 2) {
         return;
       }
       pinchActive = true;
@@ -477,6 +483,12 @@ export default function ZoomCanvas({
     };
 
     const handleTouchStart = (event: TouchEvent) => {
+      if (!enabled) {
+        if (event.touches.length === 2) {
+          event.preventDefault();
+        }
+        return;
+      }
       if (event.touches.length === 2) {
         event.preventDefault();
       }
@@ -484,6 +496,12 @@ export default function ZoomCanvas({
     };
 
     const handleTouchMove = (event: TouchEvent) => {
+      if (!enabled) {
+        if (event.touches.length === 2) {
+          event.preventDefault();
+        }
+        return;
+      }
       if (event.touches.length === 2) {
         event.preventDefault();
       }
@@ -667,7 +685,7 @@ export default function ZoomCanvas({
       gl.deleteShader(vertexShader);
       gl.deleteShader(fragmentShader);
     };
-  }, [images, layerCount, onReady]);
+    }, [images, layerCount, onReady, enabled]);
 
   if (layerCount === 0) {
     return null;

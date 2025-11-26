@@ -12,8 +12,8 @@ const createImageSet = (name: string, count: number): ImageSet => ({
 });
 
 const IMAGE_SETS: ImageSet[] = [
-  createImageSet("street", 15),
   createImageSet("animals", 13),
+  createImageSet("street", 15),
   createImageSet("faces", 12),
   createImageSet("crystals", 12),
   createImageSet("mountains", 11),

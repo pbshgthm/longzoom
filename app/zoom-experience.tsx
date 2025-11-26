@@ -63,7 +63,9 @@ export default function ZoomExperience({
         return match.name;
       }
     }
-    return imageSets[0]?.name ?? "";
+    // Default to "animals" if available, otherwise fall back to first set
+    const animalsSet = imageSets.find((set) => set.name === "animals");
+    return animalsSet?.name ?? imageSets[0]?.name ?? "";
   }, [imageSets, initialSet]);
 
   const [activeSet, setActiveSet] = useState(resolveInitialSet);
@@ -133,10 +135,12 @@ export default function ZoomExperience({
   const [targetRotation, setTargetRotation] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
+  const [showRingAfterStart, setShowRingAfterStart] = useState(false);
   const dragStartRef = useRef<{ lastAngle: number } | null>(null);
   const ringRef = useRef<HTMLDivElement>(null);
   const animationRef = useRef<number>(0);
   const hoverTimeoutRef = useRef<number | null>(null);
+  const audioStartTimeoutRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const tickBufferRef = useRef<AudioBuffer | null>(null);
   const lastClickIndexRef = useRef<number | null>(null);
@@ -231,6 +235,15 @@ export default function ZoomExperience({
       }
 
       setAudioStarted(true);
+      // Keep ring visible for 1 second after audio starts, then fade out
+      setShowRingAfterStart(true);
+      if (audioStartTimeoutRef.current !== null) {
+        clearTimeout(audioStartTimeoutRef.current);
+      }
+      audioStartTimeoutRef.current = window.setTimeout(() => {
+        setShowRingAfterStart(false);
+        audioStartTimeoutRef.current = null;
+      }, 1000);
     } catch {
       // Ignore errors
     }
@@ -442,6 +455,12 @@ export default function ZoomExperience({
       clearTimeout(hoverTimeoutRef.current);
       hoverTimeoutRef.current = null;
     }
+    // Cancel audio start fade-out if user hovers
+    if (audioStartTimeoutRef.current !== null) {
+      clearTimeout(audioStartTimeoutRef.current);
+      audioStartTimeoutRef.current = null;
+      setShowRingAfterStart(false);
+    }
     setIsHovered(true);
   }, []);
 
@@ -504,11 +523,14 @@ export default function ZoomExperience({
     // Keep hover state active - let pointer leave handler manage fade out
   }, [isDragging, targetRotation, anglePerItem]);
 
-  // Cleanup timeout on unmount
+  // Cleanup timeouts on unmount
   useEffect(
     () => () => {
       if (hoverTimeoutRef.current !== null) {
         clearTimeout(hoverTimeoutRef.current);
+      }
+      if (audioStartTimeoutRef.current !== null) {
+        clearTimeout(audioStartTimeoutRef.current);
       }
     },
     []
@@ -796,6 +818,7 @@ export default function ZoomExperience({
       style={{ minHeight: "100dvh" }}
     >
       <ZoomCanvas
+        enabled={audioStarted}
         images={activeImages}
         onReady={handleCanvasReady}
         onZoomChange={updatePlaybackRate}
@@ -862,7 +885,10 @@ export default function ZoomExperience({
               background: `radial-gradient(circle, rgba(0, 0, 0, 0.5) 0px, rgba(0, 0, 0, 0.5) ${OUTER_RADIUS}px, transparent ${OUTER_RADIUS}px)`,
               backdropFilter: "blur(8px)",
               WebkitBackdropFilter: "blur(8px)",
-              opacity: !audioStarted || isHovered || isDragging ? 1 : 0,
+              opacity:
+                !audioStarted || isHovered || isDragging || showRingAfterStart
+                  ? 1
+                  : 0,
               zIndex: 1,
               boxShadow: "0 0 0 4px rgba(0, 0, 0, 0.2)",
             }}
