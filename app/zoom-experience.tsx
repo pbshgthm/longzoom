@@ -14,8 +14,6 @@ export type ImageSet = {
   images: string[];
 };
 
-const INITIAL_LOAD_FADE_MS = 400; // Fade duration for initial load reveal
-const MIN_LOADING_DURATION_MS = 1000; // Minimum time to show loading screen
 const FADE_IN_DURATION_MS = 400; // 0 -> 50% opacity
 const FADE_TO_BLACK_DURATION_MS = 400; // 50% -> 100% opacity
 const HOLD_DURATION_MS = 200; // Hold at 100% while swapping images
@@ -53,22 +51,6 @@ const formatLabel = (name: string) =>
 
 const cx = (...classes: Array<string | false | null | undefined>) =>
   classes.filter(Boolean).join(" ");
-
-// Animated dots component for loading state
-function AnimatedDots() {
-  const [dotCount, setDotCount] = useState(1);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setDotCount((prev) => (prev % 3) + 1);
-    }, 400);
-    return () => clearInterval(interval);
-  }, []);
-
-  return (
-    <span className="inline-block w-6 text-left">{".".repeat(dotCount)}</span>
-  );
-}
 
 export default function ZoomExperience({
   imageSets,
@@ -109,13 +91,37 @@ export default function ZoomExperience({
   const [audioStarted, setAudioStarted] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
-  const [loadingFadeOut, setLoadingFadeOut] = useState(false);
+  const [dotCount, setDotCount] = useState(1);
+  const [minLoadingTimePassed, setMinLoadingTimePassed] = useState(false);
 
   // Circular selector state
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
+  }, []);
+
+  // Animate the loading dots (1, 2, 3, 1, 2, 3...)
+  useEffect(() => {
+    const isVisible = isInitialLoading || !minLoadingTimePassed;
+    if (!isVisible) return;
+    const interval = setInterval(() => {
+      setDotCount((prev) => {
+        if (prev >= 3) {
+          return 1;
+        }
+        return prev + 1;
+      });
+    }, 250);
+    return () => clearInterval(interval);
+  }, [isInitialLoading, minLoadingTimePassed]);
+
+  // Minimum loading time of 2 seconds
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setMinLoadingTimePassed(true);
+    }, 2000);
+    return () => clearTimeout(timer);
   }, []);
 
   const initialIndex = useMemo(() => {
@@ -155,6 +161,24 @@ export default function ZoomExperience({
     if (audioStarted) return; // Already started
 
     try {
+      // Request motion permission FIRST (must be in direct user gesture call stack on iOS)
+      if (isMobile && permissionState === "needs-permission") {
+        // biome-ignore lint/suspicious/noExplicitAny: iOS-specific API
+        const DeviceMotionEventClass = DeviceMotionEvent as any;
+        if (typeof DeviceMotionEventClass.requestPermission === "function") {
+          try {
+            const permission = await DeviceMotionEventClass.requestPermission();
+            if (permission === "granted") {
+              setPermissionState("granted");
+            } else {
+              setPermissionState("denied");
+            }
+          } catch (error) {
+            setPermissionState("denied");
+          }
+        }
+      }
+
       // Initialize audio context if needed
       if (!audioContextRef.current) {
         audioContextRef.current = new AudioContext();
@@ -206,29 +230,11 @@ export default function ZoomExperience({
         bgMusicRef.current = source;
       }
 
-      // Request motion permission if needed (mobile)
-      if (isMobile && permissionState === "needs-permission") {
-        // biome-ignore lint/suspicious/noExplicitAny: iOS-specific API
-        const DeviceMotionEventClass = DeviceMotionEvent as any;
-        if (typeof DeviceMotionEventClass.requestPermission === "function") {
-          try {
-            const permission = await DeviceMotionEventClass.requestPermission();
-            if (permission === "granted") {
-              setPermissionState("granted");
-            } else {
-              setPermissionState("denied");
-            }
-          } catch (error) {
-            setPermissionState("denied");
-          }
-        }
-      }
-
       setAudioStarted(true);
     } catch {
       // Ignore errors
     }
-  }, [isMobile, permissionState]);
+  }, [audioStarted, isMobile, permissionState]);
 
   // Sync mute ref with state
   useEffect(() => {
@@ -752,6 +758,7 @@ export default function ZoomExperience({
 
   const handleCanvasReady = useCallback(() => {
     setRevealReady(true);
+    setIsInitialLoading(false);
   }, []);
 
   // Step 3: During loading phase, preload images then proceed
@@ -767,41 +774,6 @@ export default function ZoomExperience({
   useEffect(() => {
     setHighlightSet(activeSet);
   }, [activeSet]);
-
-  // Preload initial images and fade out loading screen
-  useEffect(() => {
-    if (imageSets.length === 0) {
-      setIsInitialLoading(false);
-      return;
-    }
-
-    let fadeOutTimer: number | null = null;
-    const startTime = Date.now();
-    const initialSetName = resolveInitialSet();
-
-    // Wait for both: images to load AND minimum duration to pass
-    Promise.all([
-      preloadImages(initialSetName),
-      new Promise<void>((resolve) => {
-        const elapsed = Date.now() - startTime;
-        const remaining = Math.max(0, MIN_LOADING_DURATION_MS - elapsed);
-        setTimeout(() => resolve(), remaining);
-      }),
-    ]).then(() => {
-      // Start fade out animation
-      setLoadingFadeOut(true);
-      // Remove loading screen after fade completes
-      fadeOutTimer = window.setTimeout(() => {
-        setIsInitialLoading(false);
-      }, INITIAL_LOAD_FADE_MS);
-    });
-
-    return () => {
-      if (fadeOutTimer !== null) {
-        clearTimeout(fadeOutTimer);
-      }
-    };
-  }, [imageSets.length, resolveInitialSet, preloadImages]);
 
   if (imageSets.length === 0) {
     return (
@@ -823,30 +795,6 @@ export default function ZoomExperience({
       className="relative min-h-[100dvh] min-h-[100svh] w-screen overflow-hidden bg-black"
       style={{ minHeight: "100dvh" }}
     >
-      {/* Loading screen */}
-      {isInitialLoading && (
-        <div
-          className="absolute inset-0 z-50 flex items-center justify-center bg-black transition-opacity"
-          style={{
-            opacity: loadingFadeOut ? 0 : 1,
-            transitionDuration: `${INITIAL_LOAD_FADE_MS}ms`,
-            transitionTimingFunction: "ease-out",
-          }}
-        >
-          <h1
-            className="font-light text-white tracking-widest"
-            style={{
-              fontFamily: "system-ui, -apple-system, sans-serif",
-              fontSize: "clamp(1rem, 3vw, 1.5rem)",
-              letterSpacing: "0.1em",
-            }}
-          >
-            Dreaming
-            <AnimatedDots />
-          </h1>
-        </div>
-      )}
-
       <ZoomCanvas
         images={activeImages}
         onReady={handleCanvasReady}
@@ -1070,6 +1018,35 @@ export default function ZoomExperience({
           </div>
         </div>
       )}
+
+      {/* Initial loading overlay */}
+      <div
+        className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-black transition-opacity duration-700"
+        style={{
+          opacity: isInitialLoading || !minLoadingTimePassed ? 1 : 0,
+        }}
+      >
+        <span
+          className="text-white/70"
+          style={{
+            fontFamily:
+              'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+            fontSize: "1rem",
+            letterSpacing: "0.05em",
+          }}
+        >
+          Dreaming
+          <span
+            style={{
+              display: "inline-block",
+              width: "1.5ch",
+              textAlign: "left",
+            }}
+          >
+            {".".repeat(dotCount)}
+          </span>
+        </span>
+      </div>
     </div>
   );
 }
