@@ -9,6 +9,7 @@ type ZoomCanvasProps = {
   rawOrientation?: number | null;
   onZoomChange?: (zoomExponent: number, zoomRange: { min: number; max: number }) => void;
   enabled?: boolean;
+  isMobile?: boolean;
 };
 
 type Layer = {
@@ -175,12 +176,14 @@ export default function ZoomCanvas({
   rawOrientation,
   onZoomChange,
   enabled = true,
+  isMobile = false,
 }: ZoomCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const readyRef = useRef(false);
   const orientationRef = useRef<number | null>(null);
   const rawOrientationRef = useRef<number | null>(null);
+  const zoomRangeRef = useRef<{ min: number; max: number }>({ min: -1, max: 1 });
   const layerCount = images.length;
 
   // Keep orientation refs in sync with props
@@ -212,26 +215,45 @@ export default function ZoomCanvas({
     }
 
     const layers = buildLayers(images);
-    const maxDepth = normalizeDepth(layers.length - 1);
-    
-    // Calculate the CONSTANT minimum zoom exponent that ensures the image covers
-    // the entire screen at ANY rotation angle (since rotation is gyro-driven).
-    // 
-    // Key insight: When the image rotates, the minimum coverage is determined by
-    // the "inscribed circle" of the rectangle (the largest circle that fits inside
-    // at all rotation angles). This circle must cover the screen's diagonal.
-    //
-    // - Inscribed circle radius = min(width/2, height/2) = 1.5 world units
-    // - After normalization, this becomes 1.5/(BASE_RECT_WIDTH/2) = 0.75 in x-direction
-    // - Screen corners are at distance √2 from center in NDC
-    // - For coverage: 0.75/zoomScale ≥ √2 → zoomScale ≤ 0.75/√2 ≈ 0.53
-    const inscribedCircleRadius = Math.min(BASE_RECT_WIDTH / 2, BASE_RECT_HEIGHT / 2);
-    const normalizedMinExtent = inscribedCircleRadius / (BASE_RECT_WIDTH / 2);
-    const screenCornerDistance = Math.SQRT2;
-    const minZoomScale = normalizedMinExtent / screenCornerDistance;
-    const minZoomExponent = Math.log2(minZoomScale); // ≈ -0.91
-    
-    const zoomExpRange = { min: minZoomExponent, max: maxDepth };
+
+    const updateZoomRange = (canvasAspect: number) => {
+      const outerScale = layers[layerCount - 1]?.scale ?? 1;
+      const innerScale = layers[0]?.scale ?? 1;
+      const sceneAspect = BASE_RECT_WIDTH / BASE_RECT_HEIGHT;
+      const aspectStretch =
+        canvasAspect > sceneAspect
+          ? canvasAspect / sceneAspect
+          : sceneAspect / canvasAspect; // always >= 1
+
+      if (isMobile) {
+        // Rotation-independent closed form:
+        // Max zoom-in: image height matches viewport height => s/zoom = 1 => zoom = s
+        const minZoomScaleMobile = innerScale;
+        // Max zoom-out: inscribed circle of image covers circumscribed circle of viewport at any angle
+        // require (s/zoom) >= sqrt(2) => zoom <= s / sqrt(2)
+        const maxZoomScaleMobile = outerScale / Math.SQRT2;
+
+        const minExp = Math.log2(minZoomScaleMobile);
+        const maxExp = Math.log2(maxZoomScaleMobile);
+        zoomRangeRef.current =
+          minExp <= maxExp ? { min: minExp, max: maxExp } : { min: maxExp, max: minExp };
+        return;
+      }
+
+      // Desktop: fit inner (no crop) and cover outer (no background) without rotation dependence
+      // Fit: s/zoom <= 1/aspectStretch => zoom >= s * aspectStretch^-1
+      const fitStretch =
+        canvasAspect >= sceneAspect ? aspectStretch : aspectStretch; // same expression, >=1
+      const minZoomScaleDesktop = innerScale * fitStretch;
+
+      // Cover: s/zoom >= 1 => zoom <= s
+      const maxZoomScaleDesktop = outerScale;
+
+      const minExp = Math.log2(minZoomScaleDesktop);
+      const maxExp = Math.log2(maxZoomScaleDesktop);
+      zoomRangeRef.current =
+        minExp <= maxExp ? { min: minExp, max: maxExp } : { min: maxExp, max: minExp };
+    };
 
     const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexSource);
     const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
@@ -321,14 +343,12 @@ export default function ZoomCanvas({
 
     let animationFrame = 0;
     let cancelled = false;
-    
-    // Start at middle zoom level
-    const middleZoom = (zoomExpRange.min + zoomExpRange.max) / 2;
-    let targetZoomExponent = middleZoom;
-    let currentZoomExponent = middleZoom;
+    let targetZoomExponent = 0;
+    let currentZoomExponent = 0;
     let pinchStartDistance = 0;
-    let pinchStartExponent = middleZoom;
+    let pinchStartExponent = 0;
     let pinchActive = false;
+    let zoomInitialized = false;
 
     const getTouchDistance = (touches: TouchList) => {
       const [first, second] = [touches.item(0), touches.item(1)];
@@ -470,8 +490,8 @@ export default function ZoomCanvas({
 
       // Clamp to valid range
       targetZoomExponent = Math.max(
-        zoomExpRange.min,
-        Math.min(zoomExpRange.max, targetZoomExponent)
+        zoomRangeRef.current.min,
+        Math.min(zoomRangeRef.current.max, targetZoomExponent)
       );
     };
 
@@ -521,6 +541,31 @@ export default function ZoomCanvas({
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       gl.viewport(0, 0, canvas.width, canvas.height);
+
+      const canvasAspect = width / height;
+      updateZoomRange(canvasAspect);
+
+      if (!zoomInitialized) {
+        const midZoom =
+          (zoomRangeRef.current.min + zoomRangeRef.current.max) / 2;
+        targetZoomExponent = midZoom;
+        currentZoomExponent = midZoom;
+        pinchStartExponent = midZoom;
+        zoomInitialized = true;
+      } else {
+        targetZoomExponent = Math.max(
+          zoomRangeRef.current.min,
+          Math.min(zoomRangeRef.current.max, targetZoomExponent)
+        );
+        currentZoomExponent = Math.max(
+          zoomRangeRef.current.min,
+          Math.min(zoomRangeRef.current.max, currentZoomExponent)
+        );
+        pinchStartExponent = Math.max(
+          zoomRangeRef.current.min,
+          Math.min(zoomRangeRef.current.max, pinchStartExponent)
+        );
+      }
     };
 
     const applyWheelMomentum = () => {
@@ -532,8 +577,8 @@ export default function ZoomCanvas({
 
       // Clamp to valid range
       targetZoomExponent = Math.max(
-        zoomExpRange.min,
-        Math.min(zoomExpRange.max, targetZoomExponent)
+        zoomRangeRef.current.min,
+        Math.min(zoomRangeRef.current.max, targetZoomExponent)
       );
 
       wheelMomentum *= WHEEL_DAMPING;
@@ -564,8 +609,8 @@ export default function ZoomCanvas({
 
       // Clamp to valid range
       targetZoomExponent = Math.max(
-        zoomExpRange.min,
-        Math.min(zoomExpRange.max, targetZoomExponent)
+        zoomRangeRef.current.min,
+        Math.min(zoomRangeRef.current.max, targetZoomExponent)
       );
     };
 
@@ -621,21 +666,21 @@ export default function ZoomCanvas({
 
       // Fast snap-back when not interacting
       if (!pinchActive && wheelMomentum === 0) {
-        if (targetZoomExponent < zoomExpRange.min) {
+        if (targetZoomExponent < zoomRangeRef.current.min) {
           targetZoomExponent +=
-            (zoomExpRange.min - targetZoomExponent) * SNAP_BACK_SPEED;
+            (zoomRangeRef.current.min - targetZoomExponent) * SNAP_BACK_SPEED;
           if (
-            Math.abs(targetZoomExponent - zoomExpRange.min) < ZOOM_TOLERANCE
+            Math.abs(targetZoomExponent - zoomRangeRef.current.min) < ZOOM_TOLERANCE
           ) {
-            targetZoomExponent = zoomExpRange.min;
+            targetZoomExponent = zoomRangeRef.current.min;
           }
-        } else if (targetZoomExponent > zoomExpRange.max) {
+        } else if (targetZoomExponent > zoomRangeRef.current.max) {
           targetZoomExponent +=
-            (zoomExpRange.max - targetZoomExponent) * SNAP_BACK_SPEED;
+            (zoomRangeRef.current.max - targetZoomExponent) * SNAP_BACK_SPEED;
           if (
-            Math.abs(targetZoomExponent - zoomExpRange.max) < ZOOM_TOLERANCE
+            Math.abs(targetZoomExponent - zoomRangeRef.current.max) < ZOOM_TOLERANCE
           ) {
-            targetZoomExponent = zoomExpRange.max;
+            targetZoomExponent = zoomRangeRef.current.max;
           }
         }
       }
@@ -645,7 +690,7 @@ export default function ZoomCanvas({
 
       // Report zoom change to parent
       if (onZoomChange) {
-        onZoomChange(currentZoomExponent, zoomExpRange);
+        onZoomChange(currentZoomExponent, zoomRangeRef.current);
       }
 
       animationFrame = requestAnimationFrame(render);
@@ -685,7 +730,7 @@ export default function ZoomCanvas({
       gl.deleteShader(vertexShader);
       gl.deleteShader(fragmentShader);
     };
-    }, [images, layerCount, onReady, enabled]);
+    }, [images, layerCount, onReady, enabled, isMobile]);
 
   if (layerCount === 0) {
     return null;
