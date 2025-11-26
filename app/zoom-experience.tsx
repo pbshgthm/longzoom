@@ -64,9 +64,8 @@ export default function ZoomExperience({
         return match.name;
       }
     }
-    // Default to "animals" if available, otherwise fall back to first set
-    const animalsSet = imageSets.find((set) => set.name === "animals");
-    return animalsSet?.name ?? imageSets[0]?.name ?? "";
+    // Default to first set
+    return imageSets[0]?.name ?? "";
   }, [imageSets, initialSet]);
 
   const [activeSet, setActiveSet] = useState(resolveInitialSet);
@@ -139,6 +138,7 @@ export default function ZoomExperience({
   const [showRingAfterStart, setShowRingAfterStart] = useState(false);
   const [hideRing, setHideRing] = useState(false);
   const dragStartRef = useRef<{ lastAngle: number } | null>(null);
+  const dragStartIndexRef = useRef<number | null>(null);
   const ringRef = useRef<HTMLDivElement>(null);
   const animationRef = useRef<number>(0);
   const hoverTimeoutRef = useRef<number | null>(null);
@@ -186,6 +186,11 @@ export default function ZoomExperience({
     }, RING_HIDE_DELAY_MS);
   }, []);
 
+  // Get background music volume - lower on mobile
+  const getBgMusicVolume = useCallback(() => {
+    return isMobile ? 0.05 : 0.25; // 5% on mobile, 25% on desktop
+  }, [isMobile]);
+
   // Start audio - called by tapping the selector circle
   const startAudio = useCallback(async () => {
     if (audioStarted) return; // Already started
@@ -219,6 +224,10 @@ export default function ZoomExperience({
           await audioContextRef.current.decodeAudioData(arrayBuffer);
       } else if (audioContextRef.current.state === "suspended") {
         await audioContextRef.current.resume();
+        // Ensure gain is still set correctly after resume (mobile safeguard)
+        if (bgMusicGainRef.current && !isMutedRef.current) {
+          bgMusicGainRef.current.gain.value = getBgMusicVolume();
+        }
       }
 
       // Initialize background music using Web Audio API for smooth playbackRate changes
@@ -245,7 +254,7 @@ export default function ZoomExperience({
 
         // Create gain node for volume control
         const gain = ctx.createGain();
-        gain.gain.value = 0.25; // Quarter volume
+        gain.gain.value = getBgMusicVolume();
         gain.connect(ctx.destination);
         bgMusicGainRef.current = gain;
 
@@ -265,7 +274,13 @@ export default function ZoomExperience({
     } catch {
       // Ignore errors
     }
-  }, [audioStarted, isMobile, permissionState, showRingTemporarily]);
+  }, [
+    audioStarted,
+    isMobile,
+    permissionState,
+    showRingTemporarily,
+    getBgMusicVolume,
+  ]);
 
   // Sync mute ref with state
   useEffect(() => {
@@ -296,6 +311,10 @@ export default function ZoomExperience({
       // Resume context if suspended (mobile requirement)
       if (audioContextRef.current.state === "suspended") {
         await audioContextRef.current.resume();
+        // Ensure gain is still set correctly after resume (mobile safeguard)
+        if (bgMusicGainRef.current && !isMutedRef.current) {
+          bgMusicGainRef.current.gain.value = getBgMusicVolume();
+        }
       }
 
       // Ensure context is running
@@ -315,7 +334,7 @@ export default function ZoomExperience({
     } catch {
       // Ignore errors
     }
-  }, []);
+  }, [getBgMusicVolume]);
 
   // Update audio playback rate based on zoom
   // Using Web Audio API - smooth, real-time updates with zero stutter
@@ -354,7 +373,7 @@ export default function ZoomExperience({
 
       // Update background music using gain node for mute/unmute
       if (bgMusicGainRef.current) {
-        bgMusicGainRef.current.gain.value = newMuted ? 0 : 0.25; // Quarter volume
+        bgMusicGainRef.current.gain.value = newMuted ? 0 : getBgMusicVolume();
       }
 
       // If unmuting and music isn't playing, start it
@@ -365,7 +384,7 @@ export default function ZoomExperience({
       ) {
         const ctx = audioContextRef.current;
         const gain = ctx.createGain();
-        gain.gain.value = 0.25; // Quarter volume
+        gain.gain.value = getBgMusicVolume();
         gain.connect(ctx.destination);
         bgMusicGainRef.current = gain;
 
@@ -380,7 +399,7 @@ export default function ZoomExperience({
       }
       return newMuted;
     });
-  }, []);
+  }, [getBgMusicVolume]);
 
   // Check for tick sound when crossing click boundaries
   // Aligned so ticks occur when items reach the bottom position (PI/2)
@@ -497,16 +516,26 @@ export default function ZoomExperience({
     }
   }, [isDragging, hideRingAfterDelay]);
 
-  // Handle drag start - only when ring is visible
+  // Handle drag start - selected button can always drag, others need ring visible
   const handlePointerDown = useCallback(
-    (e: React.PointerEvent) => {
+    (e: React.PointerEvent, isSelectedButton = false) => {
       if (!audioStarted || fadePhase !== "idle") return;
-      // Only allow drag when ring is visible (groupVisible)
-      if (!(isHovered || showRingAfterStart) && hideRing) return;
+
+      // Selected button can always drag - show ring when dragging starts
+      if (isSelectedButton) {
+        setHideRing(false);
+        setShowRingAfterStart(true);
+        setIsHovered(true);
+      } else {
+        // Other buttons only when ring is visible
+        if (!(isHovered || showRingAfterStart) && hideRing) return;
+      }
+
       setIsDragging(true);
-      // Don't set isHovered here - visibility should only come from hovering the selected button
       const lastAngle = getPointerAngle(e.clientX, e.clientY);
       dragStartRef.current = { lastAngle };
+      // Store the selected index at drag start to ensure only one change per drag
+      dragStartIndexRef.current = selectedIndex;
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     },
     [
@@ -516,6 +545,7 @@ export default function ZoomExperience({
       isHovered,
       showRingAfterStart,
       hideRing,
+      selectedIndex,
     ]
   );
 
@@ -547,8 +577,12 @@ export default function ZoomExperience({
 
     // Snap to nearest item
     const nearestIndex = Math.round(targetRotation / anglePerItem);
-    setTargetRotation(nearestIndex * anglePerItem);
+    const snappedRotation = nearestIndex * anglePerItem;
+    setTargetRotation(snappedRotation);
+
     // Keep hover state active - let pointer leave handler manage fade out
+    // Note: dragStartIndexRef remains set until transition is triggered
+    // This ensures only one transition per drag
   }, [isDragging, targetRotation, anglePerItem]);
 
   // Cleanup timeouts on unmount
@@ -757,13 +791,78 @@ export default function ZoomExperience({
     [activeSet, fadePhase]
   );
 
+  // Calculate final selected index from targetRotation (where rotation will settle)
+  const finalSelectedIndex = useMemo(() => {
+    if (imageSets.length === 0) return 0;
+    // Normalize targetRotation to 0-2π range
+    const normalizedRotation =
+      ((targetRotation % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    const rawIndex = Math.round(normalizedRotation / anglePerItem);
+    return (
+      ((rawIndex % imageSets.length) + imageSets.length) % imageSets.length
+    );
+  }, [targetRotation, anglePerItem, imageSets.length]);
+
+  // Check if rotation has settled (ringRotation is close to targetRotation)
+  // Use a slightly larger threshold for mobile to account for touch event timing
+  const rotationSettleThreshold = isMobile ? 0.02 : 0.01;
+  const isRotationSettled = useMemo(() => {
+    const diff = Math.abs(targetRotation - ringRotation);
+    // Normalize the difference to account for wrap-around
+    const normalizedDiff = Math.min(diff, 2 * Math.PI - diff);
+    return normalizedDiff < rotationSettleThreshold;
+  }, [targetRotation, ringRotation, rotationSettleThreshold]);
+
   // Trigger transition when selected item changes
+  // Only allow one transition per drag - check if index changed from drag start
   useEffect(() => {
+    // During dragging, don't trigger transitions (wait for drag to end)
+    if (isDragging) return;
+
+    // If we have a drag start index, wait for rotation to settle and use final index
+    // This prevents intermediate transitions during rotation animation
+    if (dragStartIndexRef.current !== null) {
+      // Wait for rotation to settle before checking
+      if (!isRotationSettled) {
+        return;
+      }
+
+      const normalizedStartIndex =
+        ((dragStartIndexRef.current % imageSets.length) + imageSets.length) %
+        imageSets.length;
+      const normalizedFinalIndex =
+        ((finalSelectedIndex % imageSets.length) + imageSets.length) %
+        imageSets.length;
+
+      // If index didn't change, clear the ref and don't transition
+      if (normalizedStartIndex === normalizedFinalIndex) {
+        dragStartIndexRef.current = null;
+        return;
+      }
+
+      // Index changed - allow transition to final index
+      const selectedSet = imageSets[finalSelectedIndex];
+      if (selectedSet && selectedSet.name !== highlightSet) {
+        dragStartIndexRef.current = null;
+        startTransition(selectedSet.name);
+      }
+      return;
+    }
+
+    // Normal transition (not from drag) - use current selectedIndex
     const selectedSet = imageSets[selectedIndex];
-    if (selectedSet && selectedSet.name !== highlightSet && !isDragging) {
+    if (selectedSet && selectedSet.name !== highlightSet) {
       startTransition(selectedSet.name);
     }
-  }, [selectedIndex, imageSets, highlightSet, isDragging, startTransition]);
+  }, [
+    selectedIndex,
+    finalSelectedIndex,
+    imageSets,
+    highlightSet,
+    isDragging,
+    isRotationSettled,
+    startTransition,
+  ]);
 
   useEffect(() => {
     if (fadePhase === "fading-in") {
@@ -931,7 +1030,7 @@ export default function ZoomExperience({
             }}
           />
 
-          {/* Permanent slot circle at selected position (bottom) - black transparent */}
+          {/* Permanent slot circle at selected position (bottom) - white transparent */}
           <div
             className="pointer-events-none absolute rounded-full transition-opacity duration-300"
             style={{
@@ -940,7 +1039,7 @@ export default function ZoomExperience({
               left: "50%",
               top: "50%",
               transform: `translate(calc(-50% + 0px), calc(-50% + ${BUTTON_CIRCLE_RADIUS}px))`,
-              background: `radial-gradient(circle, rgba(0, 0, 0, 0.6) 0px, rgba(0, 0, 0, 0.6) ${OUTER_RADIUS}px, transparent ${OUTER_RADIUS}px)`,
+              background: `radial-gradient(circle, rgba(255, 255, 255, 0.3) 0px, rgba(255, 255, 255, 0.3) ${OUTER_RADIUS}px, transparent ${OUTER_RADIUS}px)`,
               backdropFilter: "blur(8px)",
               WebkitBackdropFilter: "blur(8px)",
               opacity: audioStarted ? 1 : 0,
@@ -996,20 +1095,24 @@ export default function ZoomExperience({
               const shouldShow = audioStarted
                 ? groupVisible || isAtBottom
                 : true;
-              // Allow dragging only when ring is visible (groupVisible)
-              // Selected button can trigger hover to show ring, but can only drag when ring is visible
+              // Selected button is always draggable, others need ring visible
               // Before audio starts, don't allow dragging (just clicking to start)
               const isDraggable = audioStarted
-                ? groupVisible &&
-                  (isAtBottom ||
-                    ((isHovered || isDragging || !hideRing) && shouldShow))
+                ? isAtBottom ||
+                  (groupVisible &&
+                    (isHovered || isDragging || !hideRing) &&
+                    shouldShow)
                 : false;
 
               return (
                 <div
                   className="absolute transition-opacity duration-300"
                   key={set.name}
-                  onPointerDown={isDraggable ? handlePointerDown : undefined}
+                  onPointerDown={
+                    isDraggable
+                      ? (e) => handlePointerDown(e, isAtBottom)
+                      : undefined
+                  }
                   onPointerEnter={
                     audioStarted && isAtBottom ? handlePointerEnter : undefined
                   }
