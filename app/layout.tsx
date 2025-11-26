@@ -2,9 +2,32 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Long Zoom",
-  description:
-    "Interactively zoom through layered image worlds: street scenes, animals, and faces.",
+  title: "Dream Journey",
+  description: "A journey into AI dreams, generated with Midjourney",
+  keywords: ["AI", "Midjourney", "dreams", "art", "generative art", "interactive", "zoom"],
+  authors: [{ name: "Dream Journey" }],
+  creator: "Dream Journey",
+  publisher: "Dream Journey",
+  formatDetection: {
+    email: false,
+    address: false,
+    telephone: false,
+  },
+  ...(process.env.NEXT_PUBLIC_BASE_URL && {
+    metadataBase: new URL(process.env.NEXT_PUBLIC_BASE_URL),
+  }),
+  openGraph: {
+    title: "Dream Journey",
+    description: "A journey into AI dreams, generated with Midjourney",
+    type: "website",
+    locale: "en_US",
+    siteName: "Dream Journey",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Dream Journey",
+    description: "A journey into AI dreams, generated with Midjourney",
+  },
   icons: {
     icon: "/favicon.svg",
   },

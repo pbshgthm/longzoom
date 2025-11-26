@@ -7,6 +7,7 @@ type ZoomCanvasProps = {
   onReady?: () => void;
   orientation?: number | null;
   rawOrientation?: number | null;
+  onZoomChange?: (zoomExponent: number, zoomRange: { min: number; max: number }) => void;
 };
 
 type Layer = {
@@ -19,10 +20,10 @@ const BASE_RECT_HEIGHT = 3;
 const SCALE_FACTOR = 2;
 const BASE_SCALE = 1;
 const DEFAULT_DPR = 1;
-const ZOOM_EASING = 0.1;
+const ZOOM_EASING = 0.08; // Reduced for smoother zoom (was 0.1)
 const ZOOM_TOLERANCE = 0.001;
 const WHEEL_SENSITIVITY = 0.012;
-const INNER_FIT_EXPONENT = 0.75;
+// Removed fixed INNER_FIT_EXPONENT - now calculated dynamically based on aspect ratio
 const LINE_TO_PIXEL_FACTOR = 16;
 const PAGE_TO_PIXEL_FACTOR = 800;
 const MAX_WHEEL_DELTA = 30;
@@ -47,7 +48,7 @@ const FLIP_TEXTURE_COORDINATES = 0;
 const EDGE_FEATHER_WIDTH = 0.12;
 const OUTER_EDGE_FEATHER = 0;
 const ORIENTATION_DEAD_ZONE = 0;
-const ORIENTATION_ZOOM_SPEED = 0.02;
+const ORIENTATION_ZOOM_SPEED = 0.04;
 const MIN_ZOOM_SPEED = 0.3;
 const FRAME_TIME_FACTOR = 0.016;
 const SNAP_BACK_SPEED = 0.25;
@@ -171,6 +172,7 @@ export default function ZoomCanvas({
   onReady,
   orientation,
   rawOrientation,
+  onZoomChange,
 }: ZoomCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -209,8 +211,25 @@ export default function ZoomCanvas({
 
     const layers = buildLayers(images);
     const maxDepth = normalizeDepth(layers.length - 1);
-    const innerFitExponent = Math.min(INNER_FIT_EXPONENT, maxDepth);
-    const zoomExpRange = { min: innerFitExponent, max: maxDepth };
+    
+    // Calculate the CONSTANT minimum zoom exponent that ensures the image covers
+    // the entire screen at ANY rotation angle (since rotation is gyro-driven).
+    // 
+    // Key insight: When the image rotates, the minimum coverage is determined by
+    // the "inscribed circle" of the rectangle (the largest circle that fits inside
+    // at all rotation angles). This circle must cover the screen's diagonal.
+    //
+    // - Inscribed circle radius = min(width/2, height/2) = 1.5 world units
+    // - After normalization, this becomes 1.5/(BASE_RECT_WIDTH/2) = 0.75 in x-direction
+    // - Screen corners are at distance √2 from center in NDC
+    // - For coverage: 0.75/zoomScale ≥ √2 → zoomScale ≤ 0.75/√2 ≈ 0.53
+    const inscribedCircleRadius = Math.min(BASE_RECT_WIDTH / 2, BASE_RECT_HEIGHT / 2);
+    const normalizedMinExtent = inscribedCircleRadius / (BASE_RECT_WIDTH / 2);
+    const screenCornerDistance = Math.SQRT2;
+    const minZoomScale = normalizedMinExtent / screenCornerDistance;
+    const minZoomExponent = Math.log2(minZoomScale); // ≈ -0.91
+    
+    const zoomExpRange = { min: minZoomExponent, max: maxDepth };
 
     const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexSource);
     const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
@@ -300,6 +319,7 @@ export default function ZoomCanvas({
 
     let animationFrame = 0;
     let cancelled = false;
+    
     // Start at middle zoom level
     const middleZoom = (zoomExpRange.min + zoomExpRange.max) / 2;
     let targetZoomExponent = middleZoom;
@@ -441,6 +461,12 @@ export default function ZoomCanvas({
       }
       const deltaExponent = Math.log(ratio) / Math.log(SCALE_FACTOR);
       targetZoomExponent = pinchStartExponent - deltaExponent;
+
+      // Clamp to valid range
+      targetZoomExponent = Math.max(
+        zoomExpRange.min,
+        Math.min(zoomExpRange.max, targetZoomExponent)
+      );
     };
 
     const endPinch = (event: TouchEvent) => {
@@ -485,6 +511,12 @@ export default function ZoomCanvas({
       }
       const deltaExponent = wheelMomentum * WHEEL_SENSITIVITY;
       targetZoomExponent += deltaExponent;
+
+      // Clamp to valid range
+      targetZoomExponent = Math.max(
+        zoomExpRange.min,
+        Math.min(zoomExpRange.max, targetZoomExponent)
+      );
 
       wheelMomentum *= WHEEL_DAMPING;
       if (Math.abs(wheelMomentum) < WHEEL_EPSILON) {
@@ -592,6 +624,11 @@ export default function ZoomCanvas({
 
       const zoomScale = stepZoom();
       drawScene(zoomScale);
+
+      // Report zoom change to parent
+      if (onZoomChange) {
+        onZoomChange(currentZoomExponent, zoomExpRange);
+      }
 
       animationFrame = requestAnimationFrame(render);
     };
